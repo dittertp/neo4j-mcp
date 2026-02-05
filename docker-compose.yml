@@ -1,0 +1,9 @@
+services:
+  neo4j-mcp-server:
+    build: .
+    container_name: neo4j-mcp-server
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    restart: unless-stopped
