@@ -246,47 +246,64 @@ async function main() {
   });
 
   // OIDC Discovery Proxy (hilft Agenten, die Auth-Konfiguration zu finden)
-  app.get("/.well-known/openid-configuration", async (req, res) => {
+  const getDiscoveryConfig = async (req: express.Request) => {
+    const configUrl = OAUTH_ISSUER_URL!.endsWith('/') 
+      ? `${OAUTH_ISSUER_URL}.well-known/openid-configuration`
+      : `${OAUTH_ISSUER_URL}/.well-known/openid-configuration`;
+    
+    console.error(`Fetching metadata from ${configUrl}...`);
+    const response = await fetch(configUrl);
+    if (!response.ok) throw new Error(`Provider returned ${response.status}`);
+    const data = await response.json() as any;
+    
+    // IMPORTANT: We use the actual request host to define the issuer.
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const currentServerUrl = `${protocol}://${host}`;
+    
+    console.error(`Detected Server URL for OIDC: ${currentServerUrl}`);
+
+    const proxiedConfig = {
+      ...data,
+      issuer: currentServerUrl,
+      authorization_endpoint: `${currentServerUrl}/mcp/auth`,
+      token_endpoint: `${currentServerUrl}/mcp/token`,
+      jwks_uri: `${currentServerUrl}/mcp/jwks`,
+      registration_endpoint: `${currentServerUrl}/register`,
+    };
+
+    if (!proxiedConfig.token_endpoint_auth_methods_supported) {
+      proxiedConfig.token_endpoint_auth_methods_supported = ["client_secret_post", "client_secret_basic", "bearer"];
+    } else if (!proxiedConfig.token_endpoint_auth_methods_supported.includes("bearer")) {
+      proxiedConfig.token_endpoint_auth_methods_supported.push("bearer");
+    }
+    
+    return proxiedConfig;
+  };
+
+  app.get(["/.well-known/openid-configuration", "/.well-known/oauth-authorization-server"], async (req, res) => {
     if (!isOAuthEnabled) return res.status(404).send();
     try {
-      const configUrl = OAUTH_ISSUER_URL!.endsWith('/') 
-        ? `${OAUTH_ISSUER_URL}.well-known/openid-configuration`
-        : `${OAUTH_ISSUER_URL}/.well-known/openid-configuration`;
-      
-      console.error(`Fetching metadata from ${configUrl}...`);
-      const response = await fetch(configUrl);
-      if (!response.ok) throw new Error(`Provider returned ${response.status}`);
-      const data = await response.json();
-      
-      // IMPORTANT: We use the actual request host to define the issuer.
-      // If the client calls http://localhost:3000, the issuer MUST be http://localhost:3000.
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.headers['x-forwarded-host'] || req.get('host');
-      const currentServerUrl = `${protocol}://${host}`;
-      
-      console.error(`Detected Server URL for OIDC: ${currentServerUrl}`);
-
-      const proxiedConfig = {
-        ...data,
-        issuer: currentServerUrl,
-        authorization_endpoint: `${currentServerUrl}/mcp/auth`,
-        token_endpoint: `${currentServerUrl}/mcp/token`,
-        jwks_uri: `${currentServerUrl}/mcp/jwks`,
-        registration_endpoint: `${currentServerUrl}/register`,
-      };
-
-      if (!proxiedConfig.token_endpoint_auth_methods_supported) {
-        proxiedConfig.token_endpoint_auth_methods_supported = ["client_secret_post", "client_secret_basic", "bearer"];
-      } else if (!proxiedConfig.token_endpoint_auth_methods_supported.includes("bearer")) {
-        proxiedConfig.token_endpoint_auth_methods_supported.push("bearer");
-      }
-      
-      console.error(`Serving proxied OIDC metadata. New Issuer: ${proxiedConfig.issuer}`);
+      const proxiedConfig = await getDiscoveryConfig(req);
+      console.error(`Serving proxied OIDC/OAuth metadata. New Issuer: ${proxiedConfig.issuer}`);
       res.json(proxiedConfig);
     } catch (error: any) {
       console.error(`Discovery Proxy Error: ${error.message}`);
       res.status(500).json({ error: error.message });
     }
+  });
+
+  // OAuth Protected Resource Metadata
+  app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"], (req, res) => {
+    if (!isOAuthEnabled) return res.status(404).send();
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const currentServerUrl = `${protocol}://${host}`;
+    
+    res.json({
+      resource: `${currentServerUrl}/mcp`,
+      authorization_servers: [currentServerUrl]
+    });
   });
 
   app.get("/mcp/jwks", async (req, res) => {
@@ -535,10 +552,14 @@ async function main() {
     // Falls OAuth aktiviert ist, prüfen wir den Bearer-Token
     if (isOAuthEnabled) {
       const authHeader = req.headers.authorization;
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.headers['x-forwarded-host'] || req.get('host');
+      const currentServerUrl = `${protocol}://${host}`;
       
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
         // WICHTIG: WWW-Authenticate Header hinzufügen, um dem Client mitzuteilen, dass Bearer Auth erwartet wird
-        res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
+        // Manche Clients nutzen 'as_uri' zur automatischen Entdeckung des Auth-Servers
+        res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}/.well-known/openid-configuration"`);
         return res.status(401).json({
           jsonrpc: "2.0",
           id: req.body.id || null,
@@ -558,7 +579,7 @@ async function main() {
           const isValid = await verifyToken(oauthConfig, token);
           
           if (!isValid) {
-            res.setHeader("WWW-Authenticate", 'Bearer realm="mcp", error="invalid_token"');
+            res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}/.well-known/openid-configuration", error="invalid_token"`);
             return res.status(403).json({
               jsonrpc: "2.0",
               id: req.body.id || null,
