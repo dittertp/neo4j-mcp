@@ -417,11 +417,21 @@ async function main() {
   // Proxy für Dynamic Client Registration (gibt einfach die statischen Credentials zurück)
   app.post(["/register", "/mcp/register"], (req, res) => {
     console.error("Agent requested dynamic registration. Providing static credentials...");
+    
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const currentServerUrl = `${protocol}://${host}`;
+
     res.status(201).json({
       client_id: OAUTH_CLIENT_ID,
       client_secret: OAUTH_CLIENT_SECRET,
       client_id_issued_at: Math.floor(Date.now() / 1000),
-      issuer: `${req.protocol}://${req.get('host')}`
+      issuer: currentServerUrl,
+      // Fix for "redirect_uris": "Invalid input: expected array, received undefined"
+      redirect_uris: req.body?.redirect_uris || [`${currentServerUrl}/mcp/callback`],
+      grant_types: ["authorization_code", "client_credentials", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "client_secret_post"
     });
   });
 
