@@ -19,7 +19,6 @@ const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET;
 const OAUTH_ISSUER_URL = process.env.OAUTH_ISSUER_URL;
 const OAUTH_SCOPE = process.env.OAUTH_SCOPE;
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 const isOAuthEnabled = !!(OAUTH_CLIENT_ID && OAUTH_CLIENT_SECRET && OAUTH_ISSUER_URL);
 const isBasicAuthEnabled = !!(NEO4J_USER && NEO4J_PASSWORD);
@@ -212,6 +211,7 @@ async function main() {
   });
 
   const app = express();
+  app.set('trust proxy', true);
   app.use(cors());
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
@@ -259,7 +259,7 @@ async function main() {
     // IMPORTANT: We use the actual request host to define the issuer.
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
-    const currentServerUrl = `${protocol}://${host}`;
+    const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
     
     console.error(`Detected Server URL for OIDC: ${currentServerUrl}`);
 
@@ -270,13 +270,12 @@ async function main() {
       token_endpoint: `${currentServerUrl}/mcp/token`,
       jwks_uri: `${currentServerUrl}/mcp/jwks`,
       registration_endpoint: `${currentServerUrl}/register`,
+      scopes_supported: data.scopes_supported || ["openid", "profile", "email", "neo4j"],
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code", "client_credentials", "refresh_token"],
+      token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
+      service_documentation: `${currentServerUrl}/`,
     };
-
-    if (!proxiedConfig.token_endpoint_auth_methods_supported) {
-      proxiedConfig.token_endpoint_auth_methods_supported = ["client_secret_post", "client_secret_basic", "bearer"];
-    } else if (!proxiedConfig.token_endpoint_auth_methods_supported.includes("bearer")) {
-      proxiedConfig.token_endpoint_auth_methods_supported.push("bearer");
-    }
     
     return proxiedConfig;
   };
@@ -298,7 +297,7 @@ async function main() {
     if (!isOAuthEnabled) return res.status(404).send();
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
-    const currentServerUrl = `${protocol}://${host}`;
+    const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
     
     res.json({
       resource: `${currentServerUrl}/mcp`,
@@ -333,6 +332,10 @@ async function main() {
       
       const authUrl = new URL(config.authorization_endpoint);
       
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.headers['x-forwarded-host'] || req.get('host');
+      const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+
       // Wir speichern die ursprüngliche redirect_uri vom Agenten, 
       // um den Benutzer später dorthin zurückschicken zu können.
       const agentRedirectUri = req.query.redirect_uri as string;
@@ -352,17 +355,12 @@ async function main() {
         }
       });
       
-      const staticRedirectUri = `${BASE_URL}/mcp/callback`;
+      const staticRedirectUri = `${currentServerUrl}/mcp/callback`;
       authUrl.searchParams.append("redirect_uri", staticRedirectUri);
       
       if (!authUrl.searchParams.has("client_id")) {
         authUrl.searchParams.append("client_id", OAUTH_CLIENT_ID!);
       }
-      
-      // Wir müssen uns merken, wohin wir am Ende wirklich zurückleiten müssen.
-      // In einer einfachen Implementierung nutzen wir den 'state' Parameter dafür
-      // oder eine Session (hier zur Vereinfachung im State kodiert, falls möglich, 
-      // oder wir setzen voraus, dass der Agent den State beibehält).
       
       console.error(`Redirecting user to OneLogin. Static Callback: ${staticRedirectUri}`);
       res.redirect(authUrl.toString());
@@ -439,6 +437,10 @@ async function main() {
   app.post("/mcp/token", async (req, res) => {
     console.error(`Proxying token request to OneLogin. Body: ${JSON.stringify(req.body)}`);
     try {
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.headers['x-forwarded-host'] || req.get('host');
+      const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+
       const tokenUrl = await (async () => {
         const configUrl = OAUTH_ISSUER_URL!.endsWith('/') 
           ? `${OAUTH_ISSUER_URL}.well-known/openid-configuration`
@@ -468,7 +470,7 @@ async function main() {
       
       // Falls der Agent unsere Proxy-Redirect-URI genutzt hat, müssen wir diese auch beim Token-Tausch mitschicken
       if (body.get("redirect_uri")) {
-        body.set("redirect_uri", `${BASE_URL}/mcp/callback`);
+        body.set("redirect_uri", `${currentServerUrl}/mcp/callback`);
       }
 
       // Client Credentials hinzufügen
@@ -561,15 +563,16 @@ async function main() {
 
     // Falls OAuth aktiviert ist, prüfen wir den Bearer-Token
     if (isOAuthEnabled) {
-      const authHeader = req.headers.authorization;
       const protocol = req.headers['x-forwarded-proto'] || req.protocol;
       const host = req.headers['x-forwarded-host'] || req.get('host');
-      const currentServerUrl = `${protocol}://${host}`;
+      const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+      const authHeader = req.headers.authorization;
       
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        // WICHTIG: WWW-Authenticate Header hinzufügen, um dem Client mitzuteilen, dass Bearer Auth erwartet wird
-        // Manche Clients nutzen 'as_uri' zur automatischen Entdeckung des Auth-Servers
-        res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}/.well-known/openid-configuration"`);
+        // WICHTIG: WWW-Authenticate Header hinzufügen
+        // Wir nutzen hier nur 'Bearer realm="mcp"', um maximale Kompatibilität zu gewährleisten.
+        // Die meisten Clients finden die Discovery automatisch unter /.well-known/openid-configuration
+        res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
         return res.status(401).json({
           jsonrpc: "2.0",
           id: req.body.id || null,
@@ -589,7 +592,7 @@ async function main() {
           const isValid = await verifyToken(oauthConfig, token);
           
           if (!isValid) {
-            res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}/.well-known/openid-configuration", error="invalid_token"`);
+            res.setHeader("WWW-Authenticate", 'Bearer realm="mcp", error="invalid_token"');
             return res.status(403).json({
               jsonrpc: "2.0",
               id: req.body.id || null,
