@@ -216,6 +216,13 @@ async function main() {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
+  // Hilfsfunktion zur Ermittlung der aktuellen Server-URL
+  const getServerUrl = (req: express.Request) => {
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    return `${protocol}://${host}`.replace(/\/$/, "");
+  };
+
   // Health Check
   app.get("/", (req, res) => {
     res.json({
@@ -257,9 +264,7 @@ async function main() {
     const data = await response.json() as any;
     
     // IMPORTANT: We use the actual request host to define the issuer.
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+    const currentServerUrl = getServerUrl(req);
     
     console.error(`Detected Server URL for OIDC: ${currentServerUrl}`);
 
@@ -332,9 +337,7 @@ async function main() {
       
       const authUrl = new URL(config.authorization_endpoint);
       
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.headers['x-forwarded-host'] || req.get('host');
-      const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+      const currentServerUrl = getServerUrl(req);
 
       // Wir speichern die ursprüngliche redirect_uri vom Agenten, 
       // um den Benutzer später dorthin zurückschicken zu können.
@@ -415,15 +418,13 @@ async function main() {
   // Proxy für Dynamic Client Registration (gibt einfach die statischen Credentials zurück)
   app.post(["/register", "/mcp/register"], (req, res) => {
     console.error("Agent requested dynamic registration. Providing static credentials...");
-    
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const currentServerUrl = `${protocol}://${host}`;
+    const currentServerUrl = getServerUrl(req);
 
     res.status(201).json({
       client_id: OAUTH_CLIENT_ID,
       client_secret: OAUTH_CLIENT_SECRET,
       client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_name: "neo4j-mcp-server",
       issuer: currentServerUrl,
       // Fix for "redirect_uris": "Invalid input: expected array, received undefined"
       redirect_uris: req.body?.redirect_uris || [`${currentServerUrl}/mcp/callback`],
@@ -437,9 +438,7 @@ async function main() {
   app.post("/mcp/token", async (req, res) => {
     console.error(`Proxying token request to OneLogin. Body: ${JSON.stringify(req.body)}`);
     try {
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.headers['x-forwarded-host'] || req.get('host');
-      const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+      const currentServerUrl = getServerUrl(req);
 
       const tokenUrl = await (async () => {
         const configUrl = OAUTH_ISSUER_URL!.endsWith('/') 
@@ -563,16 +562,13 @@ async function main() {
 
     // Falls OAuth aktiviert ist, prüfen wir den Bearer-Token
     if (isOAuthEnabled) {
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.headers['x-forwarded-host'] || req.get('host');
-      const currentServerUrl = `${protocol}://${host}`.replace(/\/$/, "");
+      const currentServerUrl = getServerUrl(req);
       const authHeader = req.headers.authorization;
       
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
         // WICHTIG: WWW-Authenticate Header hinzufügen
-        // Wir nutzen hier nur 'Bearer realm="mcp"', um maximale Kompatibilität zu gewährleisten.
-        // Die meisten Clients finden die Discovery automatisch unter /.well-known/openid-configuration
-        res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
+        // Wir fügen as_uri hinzu, um Clients die Discovery zu erleichtern.
+        res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}/.well-known/openid-configuration"`);
         return res.status(401).json({
           jsonrpc: "2.0",
           id: req.body.id || null,
