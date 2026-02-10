@@ -280,6 +280,10 @@ async function main() {
       grant_types_supported: ["authorization_code", "client_credentials", "refresh_token"],
       token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
       service_documentation: `${currentServerUrl}/`,
+      code_challenge_methods_supported: ["S256"],
+      id_token_signing_alg_values_supported: ["RS256"],
+      subject_types_supported: ["public"],
+      claims_supported: ["sub", "iss", "auth_time", "name", "email"]
     };
     
     return proxiedConfig;
@@ -550,7 +554,8 @@ async function main() {
   });
 
   app.post("/mcp", async (req, res) => {
-    console.error(`Received request: ${JSON.stringify(req.body)}`);
+    console.error(`Received POST /mcp. Headers: ${JSON.stringify(req.headers)}`);
+    console.error(`Body: ${JSON.stringify(req.body)}`);
     
     if (!req.body) {
         return res.status(400).json({
@@ -567,8 +572,8 @@ async function main() {
       
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
         // WICHTIG: WWW-Authenticate Header hinzufügen
-        // Wir fügen as_uri hinzu, um Clients die Discovery zu erleichtern.
-        res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}/.well-known/openid-configuration"`);
+        // Wir fügen as_uri und issuer hinzu, um Clients die Discovery zu erleichtern.
+        res.setHeader("WWW-Authenticate", `Bearer realm="mcp", as_uri="${currentServerUrl}", issuer="${currentServerUrl}", client_id="${OAUTH_CLIENT_ID}"`);
         return res.status(401).json({
           jsonrpc: "2.0",
           id: req.body.id || null,
