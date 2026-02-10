@@ -216,6 +216,19 @@ async function main() {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
+  // Health Check
+  app.get("/", (req, res) => {
+    res.json({
+      status: "ok",
+      server: "neo4j-mcp-server",
+      endpoints: {
+        mcp: "/mcp",
+        oidc: "/.well-known/openid-configuration",
+        register: "/register"
+      }
+    });
+  });
+
   // Speicher für Agent-Redirects (Zustandserhaltung über den OAuth-Flow hinweg)
   const pendingRedirects = new Map<string, string>();
 
@@ -259,7 +272,7 @@ async function main() {
         authorization_endpoint: `${currentServerUrl}/mcp/auth`,
         token_endpoint: `${currentServerUrl}/mcp/token`,
         jwks_uri: `${currentServerUrl}/mcp/jwks`,
-        registration_endpoint: `${currentServerUrl}/mcp/register`,
+        registration_endpoint: `${currentServerUrl}/register`,
       };
 
       if (!proxiedConfig.token_endpoint_auth_methods_supported) {
@@ -385,7 +398,7 @@ async function main() {
   });
 
   // Proxy für Dynamic Client Registration (gibt einfach die statischen Credentials zurück)
-  app.post("/mcp/register", (req, res) => {
+  app.post(["/register", "/mcp/register"], (req, res) => {
     console.error("Agent requested dynamic registration. Providing static credentials...");
     res.status(201).json({
       client_id: OAUTH_CLIENT_ID,
@@ -493,6 +506,21 @@ async function main() {
   });
 
   // Endpunkt für direkte MCP JSON-RPC Anfragen (ohne SSE)
+  app.get("/mcp", (req, res) => {
+    console.error(`Received GET request on /mcp. Headers: ${JSON.stringify(req.headers)}`);
+    
+    // Manche Clients (wie opencode) senden einen GET Request als Health-Check oder Handshake.
+    res.json({
+      name: "neo4j-mcp-server",
+      version: "1.0.0",
+      status: "active",
+      capabilities: {
+        tools: {}
+      },
+      message: "Neo4j MCP Server is running. Use POST for JSON-RPC requests."
+    });
+  });
+
   app.post("/mcp", async (req, res) => {
     console.error(`Received request: ${JSON.stringify(req.body)}`);
     
